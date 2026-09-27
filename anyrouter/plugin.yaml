@@ -1,0 +1,5 @@
+name: anyrouter
+kind: model-provider
+version: 0.1.0
+description: AnyRouter — unified model gateway (OpenAI-compatible, vendor/model routing slugs)
+author: duyet
