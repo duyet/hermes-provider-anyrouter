@@ -12,17 +12,8 @@ the `--provider` flag all auto-wire from the provider registry.
 App-attribution headers are **opt-in** (`ANYROUTER_APP_ATTRIBUTION=1`) and off
 by default — nothing is tagged unless you ask for it.
 
-## Why this lives outside the Hermes tree
-
-Hermes closes PRs that add third-party product integrations under `plugins/`
-in the main repo — a coupling-and-maintenance decision, not a quality bar
-("No new third-party-product plugins in-tree"; see the contributor instructions
-in the Hermes repository). Standalone plugin repos are the supported path.
-This plugin exists because
-[NousResearch/hermes-agent#54714](https://github.com/NousResearch/hermes-agent/pull/54714)
-was closed under that policy, and is submitted to the
-[plugin catalog](https://github.com/NousResearch/hermes-agent/tree/main/plugin-catalog)
-as a catalog entry instead.
+Part of the Hermes plugin ecosystem: install it from the plugin catalog, from
+git, or via pip — no core files required.
 
 ## What it does
 
@@ -46,7 +37,7 @@ as a catalog entry instead.
 ## Install
 
 ```bash
-# From the Hermes plugin catalog (once the entry lands):
+# From the Hermes plugin catalog:
 hermes plugins install anyrouter
 
 # Or straight from git:
