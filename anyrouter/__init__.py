@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import urllib.request
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from providers import register_provider
@@ -60,10 +61,24 @@ SIGNUP_URL = "https://anyrouter.dev"
 # an agent, and a model that cannot call tools is dead weight in the picker.
 _AGENTIC_CAPABILITIES = frozenset({"function-calling", "tools"})
 
+# First-party meta-models carry their own rate in the catalog. Upstream slugs
+# served through AnyRouter are left to Hermes' generic pricing path.
+_PRICED_PREFIX = "anyrouter/"
+_ONE_MILLION = Decimal("1000000")
+
+
+@dataclasses.dataclass(frozen=True)
+class _Catalog:
+    """One fetched ``/v1/models`` listing: picker ids plus per-model pricing."""
+
+    models: list[str]
+    pricing: dict[str, dict[str, Any]]
+
+
 # Keyed by API key (``""`` = anonymous). An authenticated list also carries the
 # caller's own ``@preset/<slug>`` entries, so one key's list must never be
 # served to another, nor an anonymous list to a keyed caller.
-_CATALOG_CACHE: dict[str, list[str]] = {}
+_CATALOG_CACHE: dict[str, _Catalog] = {}
 
 
 def _agentic(entry: dict[str, Any]) -> bool:
@@ -75,6 +90,32 @@ def _agentic(entry: dict[str, Any]) -> bool:
     # that accepts ``tools`` is usable by an agent even if the tag is missing.
     params = entry.get("supported_parameters")
     return isinstance(params, list) and "tools" in params
+
+
+def _per_million(pricing: dict[str, Any], key: str) -> Decimal | None:
+    """Read a non-negative per-1M USD rate from a catalog pricing block."""
+    raw = pricing.get(key)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        rate = Decimal(str(raw))
+    except InvalidOperation:
+        return None
+    return rate if rate.is_finite() and rate >= 0 else None
+
+
+def _cached_pricing(model: str) -> dict[str, Any] | None:
+    """Pricing for *model* from any cached catalog, without network I/O.
+
+    The cost hook is not told which API key served the request. A first-party
+    ``anyrouter/*`` rate is the same in every listing, so any cached catalog
+    that carries the model answers it.
+    """
+    for catalog in _CATALOG_CACHE.values():
+        pricing = catalog.pricing.get(model)
+        if pricing is not None:
+            return pricing
+    return None
 
 
 def _attribution_enabled() -> bool:
@@ -179,12 +220,12 @@ class AnyRouterProfile(ProviderProfile):
         cache_key = api_key or ""
         cached = _CATALOG_CACHE.get(cache_key)
         if cached is not None:
-            return cached
+            return cached.models
 
-        models = self._fetch_agentic_catalog(api_key=api_key, timeout=timeout)
-        if models:
-            _CATALOG_CACHE[cache_key] = models
-            return models
+        catalog = self._fetch_catalog(api_key=api_key, timeout=timeout)
+        if catalog is not None:
+            _CATALOG_CACHE[cache_key] = catalog
+            return catalog.models
 
         return self._inherited_fetch(
             api_key=api_key, base_url=base_url, timeout=timeout
@@ -210,10 +251,10 @@ class AnyRouterProfile(ProviderProfile):
             kwargs["base_url"] = base_url
         return parent.fetch_models(**kwargs)
 
-    def _fetch_agentic_catalog(
+    def _fetch_catalog(
         self, *, api_key: str | None, timeout: float
-    ) -> list[str] | None:
-        """Fetch and filter the capability-annotated catalog, or None."""
+    ) -> _Catalog | None:
+        """Fetch the catalog: tool-capable ids plus every entry's pricing."""
         open_url = _url_opener()
 
         req = urllib.request.Request(MODELS_URL)
@@ -237,18 +278,73 @@ class AnyRouterProfile(ProviderProfile):
 
         seen: set[str] = set()
         models: list[str] = []
+        pricing: dict[str, dict[str, Any]] = {}
         for entry in entries:
-            if not isinstance(entry, dict) or not _agentic(entry):
+            if not isinstance(entry, dict):
                 continue
             model_id = entry.get("model_id") or entry.get("id")
-            if isinstance(model_id, str) and model_id and model_id not in seen:
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            if isinstance(entry.get("pricing"), dict):
+                pricing.setdefault(model_id, entry["pricing"])
+            if _agentic(entry) and model_id not in seen:
                 seen.add(model_id)
                 models.append(model_id)
 
         if not models:
             logger.debug("fetch_models(anyrouter): catalog filtered to zero models")
             return None
-        return models
+        return _Catalog(models=models, pricing=pricing)
+
+    def get_usage_cost(self, model: str, usage: Any) -> Any | None:
+        """Estimate a request's cost from the cached AnyRouter catalog rate.
+
+        Only first-party ``anyrouter/*`` meta-models are priced here; upstream
+        slugs fall through to Hermes' generic pricing. The hot path never
+        touches the network — a model missing from the cached catalog (or a
+        Hermes build without ``CostResult``) yields None and the generic path.
+
+        The catalog lists one input rate and no cache rate, so cached prompt
+        tokens are charged at the input rate. Meta-models bill each hop at the
+        underlying model's rate, so the result is an estimate, not an invoice.
+        """
+        if not model.startswith(_PRICED_PREFIX):
+            return None
+        pricing = _cached_pricing(model)
+        if pricing is None:
+            logger.debug("get_usage_cost(anyrouter): %s not in cached catalog", model)
+            return None
+        input_rate = _per_million(pricing, "input_per_1m")
+        output_rate = _per_million(pricing, "output_per_1m")
+        if input_rate is None or output_rate is None:
+            logger.debug("get_usage_cost(anyrouter): %s has no usable pricing", model)
+            return None
+        try:
+            from agent.usage_pricing import CostResult, format_cost_label
+        except ImportError:
+            logger.debug("get_usage_cost(anyrouter): this Hermes build has no CostResult")
+            return None
+
+        try:
+            prompt_tokens = int(usage.prompt_tokens)
+            output_tokens = int(usage.output_tokens)
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.debug("get_usage_cost(anyrouter): unreadable usage: %s", exc)
+            return None
+
+        amount = (
+            Decimal(prompt_tokens) * input_rate + Decimal(output_tokens) * output_rate
+        ) / _ONE_MILLION
+        notes = ["AnyRouter catalog rate; meta-models bill each hop at its own rate."]
+        if pricing.get("billing") == "byok":
+            notes.append("BYOK route: billed by your upstream provider, not AnyRouter.")
+        return CostResult(
+            amount_usd=amount,
+            status="estimated",
+            source="provider_models_api",
+            label=format_cost_label(amount),
+            notes=tuple(notes),
+        )
 
     def build_extra_body(
         self, *, session_id: str | None = None, **context: Any

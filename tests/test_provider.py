@@ -8,6 +8,7 @@ import os
 import sys
 import unittest
 import urllib.request
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,11 +21,24 @@ def _catalog_payload(models):
     return json.dumps({"object": "list", "data": models}).encode()
 
 
-def _entry(model_id, capabilities=None):
-    return {
+def _entry(model_id, capabilities=None, pricing=None):
+    entry = {
         "id": model_id,
         "object": "model",
         "capabilities": capabilities if capabilities is not None else ["chat", "function-calling"],
+    }
+    if pricing is not None:
+        entry["pricing"] = pricing
+    return entry
+
+
+def _rate(input_per_1m, output_per_1m, **extra):
+    return {
+        "prompt": str(input_per_1m),
+        "completion": str(output_per_1m),
+        "input_per_1m": input_per_1m,
+        "output_per_1m": output_per_1m,
+        **extra,
     }
 
 
@@ -223,6 +237,91 @@ class TestFetchModels(unittest.TestCase):
             models = profile.fetch_models()
         # Legacy base has no base_url kwarg; must not TypeError on fallback.
         self.assertEqual(models, conftest_stub.LEGACY_SUPER_MARKER)
+
+
+class TestUsageCost(unittest.TestCase):
+    def setUp(self):
+        self.module, self.profile = conftest_stub.load_plugin()
+        self.module._CATALOG_CACHE = {}
+        self.usage = conftest_stub.StubCanonicalUsage(
+            input_tokens=800_000, cache_read_tokens=200_000, output_tokens=500_000
+        )
+
+    def _prime(self, entries, api_key="k"):
+        resp = _FakeResponse(_catalog_payload(entries))
+        mod = sys.modules["hermes_cli.urllib_security"]
+        with patch.object(mod, "open_credentialed_url", lambda req, timeout=8.0: resp):
+            self.profile.fetch_models(api_key=api_key)
+
+    def _no_network(self):
+        def boom(req, timeout=8.0):
+            raise AssertionError("get_usage_cost must not hit the network")
+
+        mod = sys.modules["hermes_cli.urllib_security"]
+        return patch.object(mod, "open_credentialed_url", boom)
+
+    def test_prices_meta_model_from_cached_catalog(self):
+        self._prime([_entry("anyrouter/hermes", pricing=_rate(0.5, 2))])
+        with self._no_network():
+            cost = self.profile.get_usage_cost("anyrouter/hermes", self.usage)
+        # (800k input + 200k cache-read) * $0.5/M + 500k * $2/M = $0.50 + $1.00
+        self.assertEqual(cost.amount_usd, Decimal("1.5"))
+        self.assertEqual(cost.status, "estimated")
+        self.assertEqual(cost.source, "provider_models_api")
+        self.assertEqual(cost.label, "~$1.5000")
+
+    def test_catalog_cache_keeps_ids_and_pricing(self):
+        self._prime([
+            _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
+            _entry("nvidia/nemotron-3-embed-1b", ["embedding"], pricing=_rate(0, 0)),
+        ])
+        catalog = self.module._CATALOG_CACHE["k"]
+        self.assertEqual(catalog.models, ["anyrouter/hermes"])
+        # Pricing covers every entry, not only the picker's tool-capable ones.
+        self.assertIn("nvidia/nemotron-3-embed-1b", catalog.pricing)
+        with self._no_network():
+            self.assertEqual(self.profile.fetch_models(api_key="k"), ["anyrouter/hermes"])
+
+    def test_byok_route_is_noted(self):
+        self._prime([
+            _entry("anyrouter/decision", pricing=_rate(0.04, 0, billing="byok")),
+        ])
+        cost = self.profile.get_usage_cost("anyrouter/decision", self.usage)
+        self.assertEqual(cost.amount_usd, Decimal("0.04"))
+        self.assertTrue(any("BYOK" in n for n in cost.notes))
+
+    def test_upstream_slug_defers_to_base(self):
+        self._prime([_entry("x-ai/grok-4.7", pricing=_rate(1.6, 4.8))])
+        self.assertIsNone(self.profile.get_usage_cost("x-ai/grok-4.7", self.usage))
+
+    def test_cache_miss_returns_none_without_network(self):
+        with self._no_network():
+            self.assertIsNone(self.profile.get_usage_cost("anyrouter/hermes", self.usage))
+
+    def test_missing_or_bad_rate_returns_none(self):
+        self._prime([
+            _entry("anyrouter/a", pricing={"prompt": "0.5"}),
+            _entry("anyrouter/b", pricing=_rate("free", 1)),
+            _entry("anyrouter/c", pricing=_rate(-1, 1)),
+            _entry("anyrouter/d", pricing=_rate(True, 1)),
+        ])
+        for model in ("anyrouter/a", "anyrouter/b", "anyrouter/c", "anyrouter/d"):
+            self.assertIsNone(self.profile.get_usage_cost(model, self.usage), model)
+
+    def test_unreadable_usage_returns_none(self):
+        self._prime([_entry("anyrouter/hermes", pricing=_rate(0.5, 2))])
+        self.assertIsNone(self.profile.get_usage_cost("anyrouter/hermes", object()))
+
+    def test_legacy_build_without_cost_result_returns_none(self):
+        module, profile = conftest_stub.load_plugin(legacy=True)
+        module._CATALOG_CACHE = {}
+        resp = _FakeResponse(_catalog_payload([
+            _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
+        ]))
+        mod = sys.modules["hermes_cli.urllib_security"]
+        with patch.object(mod, "open_credentialed_url", lambda req, timeout=8.0: resp):
+            profile.fetch_models(api_key="k")
+        self.assertIsNone(profile.get_usage_cost("anyrouter/hermes", self.usage))
 
 
 if __name__ == "__main__":
