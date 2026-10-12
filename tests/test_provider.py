@@ -33,9 +33,12 @@ def _entry(model_id, capabilities=None, pricing=None):
 
 
 def _rate(input_per_1m, output_per_1m, **extra):
+    # ``prompt`` / ``completion`` deliberately differ from the per-1M fields so
+    # a test passes only when cost is computed from ``input_per_1m`` /
+    # ``output_per_1m``.
     return {
-        "prompt": str(input_per_1m),
-        "completion": str(output_per_1m),
+        "prompt": "999",
+        "completion": "999",
         "input_per_1m": input_per_1m,
         "output_per_1m": output_per_1m,
         **extra,
@@ -307,6 +310,20 @@ class TestUsageCost(unittest.TestCase):
         ])
         for model in ("anyrouter/a", "anyrouter/b", "anyrouter/c", "anyrouter/d"):
             self.assertIsNone(self.profile.get_usage_cost(model, self.usage), model)
+
+    def test_usable_duplicate_wins_over_unusable_first(self):
+        self._prime([
+            _entry("anyrouter/hermes", pricing={"prompt": "0.5"}),
+            _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
+        ])
+        cost = self.profile.get_usage_cost("anyrouter/hermes", self.usage)
+        self.assertEqual(cost.amount_usd, Decimal("1.5"))
+
+    def test_lookup_skips_catalog_without_usable_rate(self):
+        self._prime([_entry("anyrouter/hermes", pricing={"prompt": "0.5"})], api_key="k1")
+        self._prime([_entry("anyrouter/hermes", pricing=_rate(0.5, 2))], api_key="k2")
+        cost = self.profile.get_usage_cost("anyrouter/hermes", self.usage)
+        self.assertEqual(cost.amount_usd, Decimal("1.5"))
 
     def test_unreadable_usage_returns_none(self):
         self._prime([_entry("anyrouter/hermes", pricing=_rate(0.5, 2))])

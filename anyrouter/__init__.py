@@ -68,11 +68,20 @@ _ONE_MILLION = Decimal("1000000")
 
 
 @dataclasses.dataclass(frozen=True)
+class _Rate:
+    """Per-1M USD rates parsed from one catalog entry's ``pricing`` block."""
+
+    input_per_1m: Decimal
+    output_per_1m: Decimal
+    byok: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class _Catalog:
-    """One fetched ``/v1/models`` listing: picker ids plus per-model pricing."""
+    """One fetched ``/v1/models`` listing: picker ids plus per-model rates."""
 
     models: list[str]
-    pricing: dict[str, dict[str, Any]]
+    pricing: dict[str, _Rate]
 
 
 # Keyed by API key (``""`` = anonymous). An authenticated list also carries the
@@ -92,6 +101,17 @@ def _agentic(entry: dict[str, Any]) -> bool:
     return isinstance(params, list) and "tools" in params
 
 
+def _parse_rate(pricing: Any) -> _Rate | None:
+    """Usable rates from a catalog ``pricing`` block, or None."""
+    if not isinstance(pricing, dict):
+        return None
+    input_rate = _per_million(pricing, "input_per_1m")
+    output_rate = _per_million(pricing, "output_per_1m")
+    if input_rate is None or output_rate is None:
+        return None
+    return _Rate(input_rate, output_rate, byok=pricing.get("billing") == "byok")
+
+
 def _per_million(pricing: dict[str, Any], key: str) -> Decimal | None:
     """Read a non-negative per-1M USD rate from a catalog pricing block."""
     raw = pricing.get(key)
@@ -104,17 +124,18 @@ def _per_million(pricing: dict[str, Any], key: str) -> Decimal | None:
     return rate if rate.is_finite() and rate >= 0 else None
 
 
-def _cached_pricing(model: str) -> dict[str, Any] | None:
-    """Pricing for *model* from any cached catalog, without network I/O.
+def _cached_rate(model: str) -> _Rate | None:
+    """Rate for *model* from any cached catalog, without network I/O.
 
     The cost hook is not told which API key served the request. A first-party
     ``anyrouter/*`` rate is the same in every listing, so any cached catalog
-    that carries the model answers it.
+    that carries the model answers it. Iterates a snapshot: another thread
+    may cache a catalog for a different key mid-lookup.
     """
-    for catalog in _CATALOG_CACHE.values():
-        pricing = catalog.pricing.get(model)
-        if pricing is not None:
-            return pricing
+    for catalog in tuple(_CATALOG_CACHE.values()):
+        rate = catalog.pricing.get(model)
+        if rate is not None:
+            return rate
     return None
 
 
@@ -278,15 +299,16 @@ class AnyRouterProfile(ProviderProfile):
 
         seen: set[str] = set()
         models: list[str] = []
-        pricing: dict[str, dict[str, Any]] = {}
+        pricing: dict[str, _Rate] = {}
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             model_id = entry.get("model_id") or entry.get("id")
             if not isinstance(model_id, str) or not model_id:
                 continue
-            if isinstance(entry.get("pricing"), dict):
-                pricing.setdefault(model_id, entry["pricing"])
+            rate = _parse_rate(entry.get("pricing"))
+            if rate is not None:
+                pricing.setdefault(model_id, rate)
             if _agentic(entry) and model_id not in seen:
                 seen.add(model_id)
                 models.append(model_id)
@@ -310,14 +332,11 @@ class AnyRouterProfile(ProviderProfile):
         """
         if not model.startswith(_PRICED_PREFIX):
             return None
-        pricing = _cached_pricing(model)
-        if pricing is None:
-            logger.debug("get_usage_cost(anyrouter): %s not in cached catalog", model)
-            return None
-        input_rate = _per_million(pricing, "input_per_1m")
-        output_rate = _per_million(pricing, "output_per_1m")
-        if input_rate is None or output_rate is None:
-            logger.debug("get_usage_cost(anyrouter): %s has no usable pricing", model)
+        rate = _cached_rate(model)
+        if rate is None:
+            logger.debug(
+                "get_usage_cost(anyrouter): no usable cached rate for %s", model
+            )
             return None
         try:
             from agent.usage_pricing import CostResult, format_cost_label
@@ -333,10 +352,11 @@ class AnyRouterProfile(ProviderProfile):
             return None
 
         amount = (
-            Decimal(prompt_tokens) * input_rate + Decimal(output_tokens) * output_rate
+            Decimal(prompt_tokens) * rate.input_per_1m
+            + Decimal(output_tokens) * rate.output_per_1m
         ) / _ONE_MILLION
         notes = ["AnyRouter catalog rate; meta-models bill each hop at its own rate."]
-        if pricing.get("billing") == "byok":
+        if rate.byok:
             notes.append("BYOK route: billed by your upstream provider, not AnyRouter.")
         return CostResult(
             amount_usd=amount,
