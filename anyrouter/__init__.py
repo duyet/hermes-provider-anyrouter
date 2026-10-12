@@ -64,7 +64,7 @@ _AGENTIC_CAPABILITIES = frozenset({"function-calling", "tools"})
 # First-party meta-models carry their own rate in the catalog. Upstream slugs
 # served through AnyRouter are left to Hermes' generic pricing path.
 _PRICED_PREFIX = "anyrouter/"
-_ONE_MILLION = Decimal("1000000")
+_ONE_MILLION = Decimal(1_000_000)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -272,9 +272,7 @@ class AnyRouterProfile(ProviderProfile):
             kwargs["base_url"] = base_url
         return parent.fetch_models(**kwargs)
 
-    def _fetch_catalog(
-        self, *, api_key: str | None, timeout: float
-    ) -> _Catalog | None:
+    def _fetch_catalog(self, *, api_key: str | None, timeout: float) -> _Catalog | None:
         """Fetch the catalog: tool-capable ids plus every entry's pricing."""
         open_url = _url_opener()
 
@@ -288,7 +286,7 @@ class AnyRouterProfile(ProviderProfile):
         try:
             with open_url(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a catalog failure must never break Hermes
             logger.debug("fetch_models(anyrouter): catalog API failed: %s", exc)
             return None
 
@@ -341,7 +339,9 @@ class AnyRouterProfile(ProviderProfile):
         try:
             from agent.usage_pricing import CostResult, format_cost_label
         except ImportError:
-            logger.debug("get_usage_cost(anyrouter): this Hermes build has no CostResult")
+            logger.debug(
+                "get_usage_cost(anyrouter): this Hermes build has no CostResult"
+            )
             return None
 
         try:

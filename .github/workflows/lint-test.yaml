@@ -1,0 +1,45 @@
+name: lint-test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: lint-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint + Test (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package (editable)
+        run: |
+          pip install -e .
+
+      - name: Install linting tools
+        run: |
+          pip install ruff==0.17.0
+
+      - name: Lint with ruff (check + format)
+        run: |
+          ruff check anyrouter tests
+          ruff format --check anyrouter tests
+
+      - name: Run tests with unittest
+        run: |
+          python -m unittest discover -s tests -v
