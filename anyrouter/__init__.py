@@ -60,15 +60,21 @@ SIGNUP_URL = "https://anyrouter.dev"
 # an agent, and a model that cannot call tools is dead weight in the picker.
 _AGENTIC_CAPABILITIES = frozenset({"function-calling", "tools"})
 
-_CATALOG_CACHE: list[str] | None = None
+# Keyed by API key (``""`` = anonymous). An authenticated list also carries the
+# caller's own ``@preset/<slug>`` entries, so one key's list must never be
+# served to another, nor an anonymous list to a keyed caller.
+_CATALOG_CACHE: dict[str, list[str]] = {}
 
 
 def _agentic(entry: dict[str, Any]) -> bool:
     """True when a catalog entry advertises tool-calling support."""
     caps = entry.get("capabilities")
-    if not isinstance(caps, list):
-        return False
-    return bool(_AGENTIC_CAPABILITIES & set(caps))
+    if isinstance(caps, list) and _AGENTIC_CAPABILITIES & set(caps):
+        return True
+    # ``supported_parameters`` is the authoritative OpenAI-style signal; a route
+    # that accepts ``tools`` is usable by an agent even if the tag is missing.
+    params = entry.get("supported_parameters")
+    return isinstance(params, list) and "tools" in params
 
 
 def _attribution_enabled() -> bool:
@@ -161,8 +167,6 @@ class AnyRouterProfile(ProviderProfile):
         user pointed Hermes at a proxy or a self-hosted relay. Its catalog is
         not ours to interpret, so defer to the generic path in that case.
         """
-        global _CATALOG_CACHE  # noqa: PLW0603
-
         caller_base = (base_url or "").strip()
         custom_base = bool(caller_base) and (
             caller_base.rstrip("/") != self.base_url.rstrip("/")
@@ -172,12 +176,14 @@ class AnyRouterProfile(ProviderProfile):
                 api_key=api_key, base_url=base_url, timeout=timeout
             )
 
-        if _CATALOG_CACHE is not None:
-            return _CATALOG_CACHE
+        cache_key = api_key or ""
+        cached = _CATALOG_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
         models = self._fetch_agentic_catalog(api_key=api_key, timeout=timeout)
         if models:
-            _CATALOG_CACHE = models
+            _CATALOG_CACHE[cache_key] = models
             return models
 
         return self._inherited_fetch(

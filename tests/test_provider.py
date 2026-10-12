@@ -129,7 +129,7 @@ class TestReasoningPassthrough(unittest.TestCase):
 class TestFetchModels(unittest.TestCase):
     def setUp(self):
         self.module, self.profile = conftest_stub.load_plugin()
-        self.module._CATALOG_CACHE = None
+        self.module._CATALOG_CACHE = {}
 
     def _stub_open(self, payload):
         resp = _FakeResponse(payload)
@@ -152,6 +152,21 @@ class TestFetchModels(unittest.TestCase):
         self.assertEqual(
             models, ["anyrouter/hermes", "x-ai/grok-4.7", "z-ai/glm-5.3-flash"]
         )
+
+    def test_keeps_models_that_accept_tools_without_the_tag(self):
+        entry = _entry("nvidia/nemotron-3-super-120b-a12b", ["chat"])
+        entry["supported_parameters"] = ["temperature", "tools"]
+        with self._patch_opener(_catalog_payload([entry, _entry("a/b", ["chat"])])):
+            models = self.profile.fetch_models(api_key="k")
+        self.assertEqual(models, ["nvidia/nemotron-3-super-120b-a12b"])
+
+    def test_cache_is_per_api_key_so_presets_do_not_leak(self):
+        mine = _catalog_payload([_entry("a/b"), _entry("@preset/mine")])
+        other = _catalog_payload([_entry("a/b")])
+        with self._patch_opener(mine):
+            self.assertIn("@preset/mine", self.profile.fetch_models(api_key="k1"))
+        with self._patch_opener(other):
+            self.assertNotIn("@preset/mine", self.profile.fetch_models(api_key="k2"))
 
     def test_dedupes(self):
         payload = _catalog_payload([
@@ -198,7 +213,7 @@ class TestFetchModels(unittest.TestCase):
 
     def test_legacy_base_signature_still_falls_back(self):
         module, profile = conftest_stub.load_plugin(legacy=True)
-        module._CATALOG_CACHE = None
+        module._CATALOG_CACHE = {}
 
         def boom(req, timeout=8.0):
             raise OSError("down")
