@@ -7,14 +7,13 @@ import json
 import os
 import sys
 import unittest
-import urllib.request
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import conftest_stub  # noqa: E402
+import conftest_stub
 
 
 def _catalog_payload(models):
@@ -25,7 +24,9 @@ def _entry(model_id, capabilities=None, pricing=None):
     entry = {
         "id": model_id,
         "object": "model",
-        "capabilities": capabilities if capabilities is not None else ["chat", "function-calling"],
+        "capabilities": capabilities
+        if capabilities is not None
+        else ["chat", "function-calling"],
     }
     if pricing is not None:
         entry["pricing"] = pricing
@@ -131,9 +132,7 @@ class TestReasoningPassthrough(unittest.TestCase):
         extra, _ = self.profile.build_api_kwargs_extras(
             reasoning_config=None, supports_reasoning=True
         )
-        self.assertEqual(
-            extra["reasoning"], {"enabled": True, "effort": "medium"}
-        )
+        self.assertEqual(extra["reasoning"], {"enabled": True, "effort": "medium"})
 
     def test_reasoning_omitted_when_unsupported(self):
         extra, top = self.profile.build_api_kwargs_extras(
@@ -157,13 +156,15 @@ class TestFetchModels(unittest.TestCase):
         return patch.object(mod, "open_credentialed_url", self._stub_open(payload))
 
     def test_filters_to_tool_capable(self):
-        payload = _catalog_payload([
-            _entry("anyrouter/hermes"),
-            _entry("nvidia/nemotron-3.5-content-safety", ["chat", "vision"]),
-            _entry("x-ai/grok-4.7", ["chat", "function-calling", "vision"]),
-            _entry("nvidia/nemotron-3-embed-1b", ["embedding"]),
-            _entry("z-ai/glm-5.3-flash", ["chat", "agentic", "tools"]),
-        ])
+        payload = _catalog_payload(
+            [
+                _entry("anyrouter/hermes"),
+                _entry("nvidia/nemotron-3.5-content-safety", ["chat", "vision"]),
+                _entry("x-ai/grok-4.7", ["chat", "function-calling", "vision"]),
+                _entry("nvidia/nemotron-3-embed-1b", ["embedding"]),
+                _entry("z-ai/glm-5.3-flash", ["chat", "agentic", "tools"]),
+            ]
+        )
         with self._patch_opener(payload):
             models = self.profile.fetch_models(api_key="k")
         self.assertEqual(
@@ -186,9 +187,13 @@ class TestFetchModels(unittest.TestCase):
             self.assertNotIn("@preset/mine", self.profile.fetch_models(api_key="k2"))
 
     def test_dedupes(self):
-        payload = _catalog_payload([
-            _entry("a/b"), _entry("a/b"), _entry("c/d"),
-        ])
+        payload = _catalog_payload(
+            [
+                _entry("a/b"),
+                _entry("a/b"),
+                _entry("c/d"),
+            ]
+        )
         with self._patch_opener(payload):
             models = self.profile.fetch_models()
         self.assertEqual(models, ["a/b", "c/d"])
@@ -199,9 +204,12 @@ class TestFetchModels(unittest.TestCase):
         self.assertEqual(models, conftest_stub.SUPER_MARKER)
 
     def test_falls_back_when_all_filtered(self):
-        payload = _catalog_payload([
-            _entry("m/e", ["embedding"]), _entry("m/t", ["chat"]),
-        ])
+        payload = _catalog_payload(
+            [
+                _entry("m/e", ["embedding"]),
+                _entry("m/t", ["chat"]),
+            ]
+        )
         with self._patch_opener(payload):
             models = self.profile.fetch_models()
         self.assertEqual(models, conftest_stub.SUPER_MARKER)
@@ -223,9 +231,7 @@ class TestFetchModels(unittest.TestCase):
     def test_custom_base_url_skips_catalog(self):
         # A proxy/relay catalog is not ours to interpret — generic path only.
         with self._patch_opener(_catalog_payload([_entry("a/b")])):
-            models = self.profile.fetch_models(
-                base_url="https://relay.internal/v1"
-            )
+            models = self.profile.fetch_models(base_url="https://relay.internal/v1")
         self.assertEqual(models, conftest_stub.SUPER_MARKER)
 
     def test_legacy_base_signature_still_falls_back(self):
@@ -274,21 +280,29 @@ class TestUsageCost(unittest.TestCase):
         self.assertEqual(cost.label, "~$1.5000")
 
     def test_catalog_cache_keeps_ids_and_pricing(self):
-        self._prime([
-            _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
-            _entry("nvidia/nemotron-3-embed-1b", ["embedding"], pricing=_rate(0, 0)),
-        ])
+        self._prime(
+            [
+                _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
+                _entry(
+                    "nvidia/nemotron-3-embed-1b", ["embedding"], pricing=_rate(0, 0)
+                ),
+            ]
+        )
         catalog = self.module._CATALOG_CACHE["k"]
         self.assertEqual(catalog.models, ["anyrouter/hermes"])
         # Pricing covers every entry, not only the picker's tool-capable ones.
         self.assertIn("nvidia/nemotron-3-embed-1b", catalog.pricing)
         with self._no_network():
-            self.assertEqual(self.profile.fetch_models(api_key="k"), ["anyrouter/hermes"])
+            self.assertEqual(
+                self.profile.fetch_models(api_key="k"), ["anyrouter/hermes"]
+            )
 
     def test_byok_route_is_noted(self):
-        self._prime([
-            _entry("anyrouter/decision", pricing=_rate(0.04, 0, billing="byok")),
-        ])
+        self._prime(
+            [
+                _entry("anyrouter/decision", pricing=_rate(0.04, 0, billing="byok")),
+            ]
+        )
         cost = self.profile.get_usage_cost("anyrouter/decision", self.usage)
         self.assertEqual(cost.amount_usd, Decimal("0.04"))
         self.assertTrue(any("BYOK" in n for n in cost.notes))
@@ -299,28 +313,36 @@ class TestUsageCost(unittest.TestCase):
 
     def test_cache_miss_returns_none_without_network(self):
         with self._no_network():
-            self.assertIsNone(self.profile.get_usage_cost("anyrouter/hermes", self.usage))
+            self.assertIsNone(
+                self.profile.get_usage_cost("anyrouter/hermes", self.usage)
+            )
 
     def test_missing_or_bad_rate_returns_none(self):
-        self._prime([
-            _entry("anyrouter/a", pricing={"prompt": "0.5"}),
-            _entry("anyrouter/b", pricing=_rate("free", 1)),
-            _entry("anyrouter/c", pricing=_rate(-1, 1)),
-            _entry("anyrouter/d", pricing=_rate(True, 1)),
-        ])
+        self._prime(
+            [
+                _entry("anyrouter/a", pricing={"prompt": "0.5"}),
+                _entry("anyrouter/b", pricing=_rate("free", 1)),
+                _entry("anyrouter/c", pricing=_rate(-1, 1)),
+                _entry("anyrouter/d", pricing=_rate(True, 1)),
+            ]
+        )
         for model in ("anyrouter/a", "anyrouter/b", "anyrouter/c", "anyrouter/d"):
             self.assertIsNone(self.profile.get_usage_cost(model, self.usage), model)
 
     def test_usable_duplicate_wins_over_unusable_first(self):
-        self._prime([
-            _entry("anyrouter/hermes", pricing={"prompt": "0.5"}),
-            _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
-        ])
+        self._prime(
+            [
+                _entry("anyrouter/hermes", pricing={"prompt": "0.5"}),
+                _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
+            ]
+        )
         cost = self.profile.get_usage_cost("anyrouter/hermes", self.usage)
         self.assertEqual(cost.amount_usd, Decimal("1.5"))
 
     def test_lookup_skips_catalog_without_usable_rate(self):
-        self._prime([_entry("anyrouter/hermes", pricing={"prompt": "0.5"})], api_key="k1")
+        self._prime(
+            [_entry("anyrouter/hermes", pricing={"prompt": "0.5"})], api_key="k1"
+        )
         self._prime([_entry("anyrouter/hermes", pricing=_rate(0.5, 2))], api_key="k2")
         cost = self.profile.get_usage_cost("anyrouter/hermes", self.usage)
         self.assertEqual(cost.amount_usd, Decimal("1.5"))
@@ -332,9 +354,13 @@ class TestUsageCost(unittest.TestCase):
     def test_legacy_build_without_cost_result_returns_none(self):
         module, profile = conftest_stub.load_plugin(legacy=True)
         module._CATALOG_CACHE = {}
-        resp = _FakeResponse(_catalog_payload([
-            _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
-        ]))
+        resp = _FakeResponse(
+            _catalog_payload(
+                [
+                    _entry("anyrouter/hermes", pricing=_rate(0.5, 2)),
+                ]
+            )
+        )
         mod = sys.modules["hermes_cli.urllib_security"]
         with patch.object(mod, "open_credentialed_url", lambda req, timeout=8.0: resp):
             profile.fetch_models(api_key="k")

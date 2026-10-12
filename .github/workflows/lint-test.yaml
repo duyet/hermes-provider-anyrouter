@@ -2,9 +2,9 @@ name: lint-test
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 concurrency:
   group: lint-test-${{ github.workflow }}-${{ github.ref }}
@@ -25,6 +25,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install package (editable)
         run: |
@@ -32,7 +33,7 @@ jobs:
 
       - name: Install linting tools
         run: |
-          pip install ruff
+          pip install ruff==0.17.0
 
       - name: Lint with ruff (check + format)
         run: |
