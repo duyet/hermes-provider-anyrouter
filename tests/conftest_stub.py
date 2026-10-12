@@ -12,6 +12,7 @@ import importlib.util
 import sys
 import types
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,35 @@ class StubProviderProfile:
         timeout: float = 8.0,
     ) -> list[str] | None:
         return list(SUPER_MARKER)
+
+
+@dataclass(frozen=True)
+class StubCanonicalUsage:
+    """Mirrors ``agent.usage_pricing.CanonicalUsage``."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    request_count: int = 1
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+
+
+@dataclass(frozen=True)
+class StubCostResult:
+    """Mirrors ``agent.usage_pricing.CostResult``."""
+
+    amount_usd: Decimal | None
+    status: str
+    source: str
+    label: str
+    fetched_at: Any = None
+    pricing_version: str | None = None
+    notes: tuple = ()
 
 
 LEGACY_SUPER_MARKER = ["__legacy_inherited_fetch_models__"]
@@ -119,6 +149,20 @@ def install_stubs(*, legacy: bool = False) -> dict[str, Any]:
     sys.modules["providers.base"] = base_mod
     sys.modules["hermes_cli"] = hermes_cli_mod
     sys.modules["hermes_cli.urllib_security"] = security_mod
+
+    # Legacy builds predate the cost hook and ``agent.usage_pricing``.
+    if legacy:
+        sys.modules.pop("agent", None)
+        sys.modules.pop("agent.usage_pricing", None)
+    else:
+        pricing_mod = types.ModuleType("agent.usage_pricing")
+        pricing_mod.CostResult = StubCostResult
+        pricing_mod.CanonicalUsage = StubCanonicalUsage
+        pricing_mod.format_cost_label = lambda amount: f"~${amount:.4f}"
+        agent_mod = types.ModuleType("agent")
+        agent_mod.usage_pricing = pricing_mod
+        sys.modules["agent"] = agent_mod
+        sys.modules["agent.usage_pricing"] = pricing_mod
     return registry
 
 

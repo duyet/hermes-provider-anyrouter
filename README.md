@@ -30,6 +30,13 @@ git, or via pip — no core files required.
 - **First-party meta-models** like `anyrouter/hermes` (auto-routes across top
   tool-calling models with fallback) are surfaced alongside `vendor/model`
   routes like `x-ai/grok-4.7` and `moonshotai/kimi-k3`.
+- **Per-request cost estimates** for first-party `anyrouter/*` meta-models,
+  from the `pricing.input_per_1m` / `output_per_1m` rates in the catalog.
+  The catalog (ids and pricing) is cached per API key when the model list
+  is fetched, so cost lookups never touch the network. Upstream slugs, and
+  models not yet in the cache, fall back to Hermes' generic pricing.
+  Meta-models bill each hop at the underlying model's rate, so the figure is
+  an estimate, not an invoice.
 - **Privacy-respecting by default.** App-attribution headers are opt-in only
   (`ANYROUTER_APP_ATTRIBUTION=1`) — nothing is tagged unless you ask for it.
 
@@ -119,7 +126,8 @@ way to watch a request go through.
 ## Hermes version
 
 There is no version pin. Every contact point with core
-(`_supported_kwargs`, `_inherited_fetch`, `hermes_cli.urllib_security`) is
+(`_supported_kwargs`, `_inherited_fetch`, `hermes_cli.urllib_security`,
+`agent.usage_pricing.CostResult`) is
 resolved by introspection, so newer profile fields are used when present and
 skipped on older builds.
 
